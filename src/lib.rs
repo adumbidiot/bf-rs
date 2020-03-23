@@ -1,165 +1,217 @@
-use std::fmt;
+pub mod interpreter;
+pub mod lexer;
+pub mod optimize;
+pub mod parser;
+pub mod v1;
 
-#[derive(Debug)]
-pub enum Instruction {
-    ShiftLeft,
-    ShiftRight,
+pub use crate::{
+    interpreter::{
+        Handler,
+        Interpreter,
+    },
+    lexer::{
+        Lexer,
+        Token,
+        TokenData,
+    },
+    optimize::{
+        OptimizePass,
+        Optimizer,
+        SpecExecOptimizer,
+        ZeroLoopOptimizer,
+    },
+    parser::{
+        Expr,
+        Parser,
+    },
+};
 
-    Increment,
-    Decrement,
-
-    StartLoop,
-    EndLoop,
-
-    Read,
-    Print,
+#[derive(Default)]
+pub struct PythonCodeGen {
+    pub output: String,
+    tab_index: usize,
+    newline: bool,
 }
 
-impl Instruction {
-    pub fn from_char(c: char) -> Option<Self> {
-        match c {
-            '>' => Some(Instruction::ShiftRight),
-            '<' => Some(Instruction::ShiftLeft),
-            '+' => Some(Instruction::Increment),
-            '-' => Some(Instruction::Decrement),
-            '[' => Some(Instruction::StartLoop),
-            ']' => Some(Instruction::EndLoop),
-            ',' => Some(Instruction::Read),
-            '.' => Some(Instruction::Print),
-            _ => None,
-        }
-    }
-
-    pub fn is_end_loop(&self) -> bool {
-        match self {
-            Instruction::EndLoop => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_start_loop(&self) -> bool {
-        match self {
-            Instruction::StartLoop => true,
-            _ => false,
-        }
-    }
-}
-
-fn default_output_func(_c: u8) {}
-fn default_input_func() -> u8 {
-    0
-}
-
-#[derive(Clone)]
-pub struct Interpreter<'i, 'o> {
-    mem: Vec<u8>,
-    ptr: usize,
-    output_func: &'o dyn Fn(u8),
-    input_func: &'i dyn Fn() -> u8,
-}
-
-impl<'i, 'o> Interpreter<'i, 'o> {
+impl PythonCodeGen {
     pub fn new() -> Self {
-        Interpreter {
-            mem: Vec::new(),
-            ptr: 0,
-            output_func: &default_output_func,
-            input_func: &default_input_func,
+        Self {
+            output: String::new(),
+            tab_index: 0,
+            newline: true,
         }
     }
 
-    pub fn set_output_func(&mut self, output_func: &'o dyn Fn(u8)) {
-        self.output_func = output_func;
-    }
-
-    pub fn set_input_func(&mut self, input_func: &'i dyn Fn() -> u8) {
-        self.input_func = input_func;
-    }
-
-    fn get(&mut self, i: usize) -> u8 {
-        if i >= self.mem.len() {
-            self.mem.resize(i + 1, 0);
-        }
-
-        *self.mem.get(i).unwrap()
-    }
-
-    fn get_mut(&mut self, i: usize) -> &mut u8 {
-        if i >= self.mem.len() {
-            self.mem.resize(i + 1, 0);
-        }
-
-        self.mem.get_mut(i).unwrap()
-    }
-
-    pub fn exec(&mut self, instructions: &[Instruction]) {
-        let mut loop_stack = Vec::new();
-
-        let mut i = 0;
-        while i < instructions.len() {
-            let ins = instructions.get(i).expect("Instruction");
-            match ins {
-                Instruction::ShiftRight => {
-                    self.ptr += 1;
+    pub fn write(&mut self, s: &str) {
+        for c in s.chars() {
+            if self.newline {
+                for _ in 0..self.tab_index {
+                    self.output.push('\t');
                 }
-                Instruction::ShiftLeft => {
-                    self.ptr -= 1;
+                self.newline = false;
+            }
+
+            match c {
+                '\n' => {
+                    self.newline = true;
+                    self.output.push(c);
                 }
-                Instruction::Increment => {
-                    let (v, _) = self.get(self.ptr).overflowing_add(1);
-                    *self.get_mut(self.ptr) = v;
-                }
-                Instruction::Decrement => {
-                    *self.get_mut(self.ptr) -= 1;
-                }
-                Instruction::StartLoop => {
-                    if self.get(self.ptr) == 0 {
-                        let mut found_start = 0;
-                        i += instructions[i..]
-                            .iter()
-                            .position(|i| {
-                                if found_start > 1 && i.is_end_loop() {
-                                    found_start -= 1;
-                                    false
-                                } else if i.is_start_loop() {
-                                    found_start += 1;
-                                    false
-                                } else if found_start == 1 && i.is_end_loop() {
-                                    true
-                                } else {
-                                    false
-                                }
-                            })
-                            .expect("Valid end loop");
-                    } else {
-                        loop_stack.push(i);
-                    }
-                }
-                Instruction::EndLoop => {
-                    if self.get(self.ptr) != 0 {
-                        i = *loop_stack.last().expect("Valid startloop");
-                    } else {
-                        loop_stack.pop().expect("In Loop");
-                    }
-                }
-                Instruction::Read => {
-                    *self.get_mut(self.ptr) = (self.input_func)();
-                }
-                Instruction::Print => {
-                    let out = self.get(self.ptr);
-                    (self.output_func)(out);
+                _ => {
+                    self.output.push(c);
                 }
             }
-            i += 1;
+        }
+    }
+
+    pub fn write_preamble(&mut self) {
+        self.write("cells = []\n");
+        self.write("for i in range(0, 10000):\n");
+        self.tab_index += 1;
+        self.write("cells.append(0)\n");
+        self.tab_index -= 1;
+
+        self.write("cell_index = 0\n");
+    }
+
+    pub fn gen(&mut self, expr: &Expr) {
+        if expr.uses_memory() {
+            self.write_preamble();
+        }
+
+        self.gen_expr(expr);
+    }
+
+    fn gen_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Block { exprs } => {
+                for expr in exprs {
+                    self.gen_expr(expr);
+                }
+            }
+            Expr::Increment { num } => {
+                self.write(&format!("cells[cell_index] += {}\n", num));
+            }
+            Expr::Decrement { num } => {
+                self.write(&format!("cells[cell_index] -= {}\n", num));
+            }
+            Expr::ShiftRight { num } => {
+                self.write(&format!("cell_index += {}\n", num));
+            }
+            Expr::ShiftLeft { num } => {
+                self.write(&format!("cell_index -= {}\n", num));
+            }
+            Expr::Loop { expr } => {
+                self.write("while cells[cell_index] != 0:\n");
+                self.tab_index += 1;
+                self.gen_expr(expr);
+                self.tab_index -= 1;
+            }
+            Expr::ReadChar => {
+                self.write("cells[cell_index] = ord((input() + ' ')[0])\n");
+            }
+            Expr::PrintChar => {
+                self.write("print(chr(cells[cell_index]), end='')\n");
+            }
+            Expr::Assign { index, value } => {
+                self.write(&format!("cells[{}] = {}\n", index, value));
+            }
+            Expr::AssignCurrent { value } => {
+                self.write(&format!("cells[cell_index] = {}\n", value));
+            }
+            Expr::SetCellPointer { value } => {
+                self.write(&format!("cell_index = {}\n", value));
+            }
+            Expr::PrintString { value } => {
+                self.write(&format!("print('{}', end='')\n", value));
+            }
+            Expr::ReadCharForget => {
+                self.write("input()\n");
+            }
         }
     }
 }
 
-impl<'i, 'o> fmt::Debug for Interpreter<'i, 'o> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Interpreter")
-            .field("mem", &self.mem)
-            .field("ptr", &self.ptr)
-            .finish()
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    struct TestHandler {
+        out: String,
+    }
+
+    impl TestHandler {
+        fn new() -> Self {
+            Self { out: String::new() }
+        }
+    }
+
+    impl Handler for TestHandler {
+        fn write_char(&mut self, c: u8) {
+            self.out.push(char::from(c));
+        }
+    }
+
+    fn test_output_optimized_py(data: &str, expected: &str) {
+        let mut l = Lexer::new(data);
+        l.lex().unwrap();
+
+        let mut p = Parser::new(l.tokens);
+        let exprs = p.parse().unwrap();
+
+        let mut o = Optimizer::new(exprs);
+        o.add_pass(ZeroLoopOptimizer);
+        o.add_pass(SpecExecOptimizer);
+        o.optimize();
+
+        let exprs = o.expr;
+
+        let mut codegen = PythonCodeGen::new();
+        codegen.gen(&exprs);
+        // std::fs::write("test.py", &codegen.output).unwrap();
+
+        let mut vm = Interpreter::new(TestHandler::new());
+        vm.run(&exprs).unwrap();
+
+        dbg!(&exprs);
+
+        assert_eq!(vm.handler.out.as_str(), expected);
+    }
+
+    #[test]
+    fn aids_optimized_py() {
+        test_output_optimized_py(
+            include_str!("../test_data/aids.bf"),
+            "How are you?I fucked a cheese burger",
+        );
+    }
+
+    fn test_output_optimized(data: &str, expected: &str) {
+        let mut l = Lexer::new(data);
+        l.lex().unwrap();
+
+        let mut p = Parser::new(l.tokens);
+        let exprs = p.parse().unwrap();
+
+        let mut o = Optimizer::new(exprs);
+        o.add_pass(ZeroLoopOptimizer);
+        o.add_pass(SpecExecOptimizer);
+        o.optimize();
+
+        let exprs = o.expr;
+
+        let mut vm = Interpreter::new(TestHandler::new());
+        vm.run(&exprs).unwrap();
+
+        dbg!(&exprs);
+
+        assert_eq!(vm.handler.out.as_str(), expected);
+    }
+
+    #[test]
+    fn aids_optimized() {
+        test_output_optimized(
+            include_str!("../test_data/aids.bf"),
+            "How are you?I fucked a cheese burger",
+        );
     }
 }

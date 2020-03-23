@@ -1,7 +1,5 @@
 [package]
 name = "bf"
 version = "0.0.1"
-authors = ["adumbidiot <nathaniel.daniel23@outlook.com>"]
+authors = [ "adumbidiot <nathaniel.daniel23@outlook.com>" ]
 edition = "2018"
-
-[dependencies]
